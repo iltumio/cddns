@@ -1,0 +1,125 @@
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::fs;
+use std::net::IpAddr;
+use std::path::Path;
+
+/// Main configuration structure
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    /// Cloudflare API configuration
+    pub cloudflare: CloudflareConfig,
+    /// DNS records to update
+    pub records: Vec<RecordConfig>,
+    /// Optional settings
+    #[serde(default)]
+    pub settings: Settings,
+}
+
+/// Cloudflare authentication configuration
+#[derive(Debug, Deserialize)]
+pub struct CloudflareConfig {
+    /// API token (recommended) - requires Zone:Read and DNS:Edit permissions
+    pub api_token: String,
+}
+
+/// DNS record configuration
+#[derive(Debug, Deserialize)]
+pub struct RecordConfig {
+    /// The zone name (e.g., "example.com")
+    pub zone: String,
+    /// The full record name (e.g., "home.example.com")
+    pub name: String,
+    /// Record type: "A" for IPv4, "AAAA" for IPv6
+    #[serde(default = "default_record_type")]
+    pub record_type: RecordType,
+    /// Whether the record should be proxied through Cloudflare
+    #[serde(default)]
+    pub proxied: bool,
+    /// TTL in seconds (1 = automatic)
+    #[serde(default = "default_ttl")]
+    pub ttl: u32,
+}
+
+/// Optional settings
+#[derive(Debug, Deserialize, Default)]
+pub struct Settings {
+    /// URL to fetch public IPv4 address
+    #[serde(default = "default_ipv4_url")]
+    pub ipv4_url: String,
+    /// URL to fetch public IPv6 address
+    #[serde(default = "default_ipv6_url")]
+    pub ipv6_url: String,
+    /// Optional: Force a specific IP instead of auto-detecting
+    pub force_ip: Option<IpAddr>,
+}
+
+/// Supported DNS record types for DDNS
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum RecordType {
+    A,
+    AAAA,
+}
+
+impl std::fmt::Display for RecordType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RecordType::A => write!(f, "A"),
+            RecordType::AAAA => write!(f, "AAAA"),
+        }
+    }
+}
+
+fn default_record_type() -> RecordType {
+    RecordType::A
+}
+
+fn default_ttl() -> u32 {
+    1 // Automatic TTL
+}
+
+fn default_ipv4_url() -> String {
+    "https://api.ipify.org".to_string()
+}
+
+fn default_ipv6_url() -> String {
+    "https://api6.ipify.org".to_string()
+}
+
+impl Config {
+    /// Load configuration from a TOML file
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+
+        let config: Config = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+
+        config.validate()?;
+
+        Ok(config)
+    }
+
+    /// Validate the configuration
+    fn validate(&self) -> Result<()> {
+        if self.cloudflare.api_token.is_empty() {
+            anyhow::bail!("Cloudflare API token cannot be empty");
+        }
+
+        if self.records.is_empty() {
+            anyhow::bail!("At least one DNS record must be configured");
+        }
+
+        for record in &self.records {
+            if record.zone.is_empty() {
+                anyhow::bail!("Record zone cannot be empty");
+            }
+            if record.name.is_empty() {
+                anyhow::bail!("Record name cannot be empty");
+            }
+        }
+
+        Ok(())
+    }
+}

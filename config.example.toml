@@ -1,0 +1,43 @@
+# Cloudflare DDNS Configuration Example
+# Copy this file to config.toml and update with your settings
+
+# Cloudflare API credentials
+[cloudflare]
+# API Token (recommended)
+# Create one at: https://dash.cloudflare.com/profile/api-tokens
+# Required permissions: Zone:Read, DNS:Edit
+api_token = "your-api-token-here"
+
+# DNS records to update
+# You can specify multiple records
+
+[[records]]
+zone = "example.com"           # Your domain/zone name
+name = "home.example.com"      # Full DNS record name
+record_type = "A"              # "A" for IPv4, "AAAA" for IPv6
+proxied = false                # Whether to proxy through Cloudflare
+ttl = 1                        # TTL in seconds (1 = automatic)
+
+[[records]]
+zone = "example.com"
+name = "vpn.example.com"
+record_type = "A"
+proxied = false
+ttl = 300
+
+# Example IPv6 record
+# [[records]]
+# zone = "example.com"
+# name = "home6.example.com"
+# record_type = "AAAA"
+# proxied = false
+# ttl = 1
+
+# Optional settings (defaults shown)
+[settings]
+# URLs for public IP detection
+ipv4_url = "https://api.ipify.org"
+ipv6_url = "https://api6.ipify.org"
+
+# Uncomment to force a specific IP instead of auto-detecting
+# force_ip = "1.2.3.4"
