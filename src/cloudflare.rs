@@ -4,9 +4,9 @@ use cloudflare::endpoints::dns::dns::{
     ListDnsRecordsParams, UpdateDnsRecord, UpdateDnsRecordParams,
 };
 use cloudflare::endpoints::zones::zone::{ListZones, ListZonesParams};
+use cloudflare::framework::auth::Credentials;
 use cloudflare::framework::client::async_api::Client;
 use cloudflare::framework::client::ClientConfig;
-use cloudflare::framework::auth::Credentials;
 use cloudflare::framework::Environment;
 use std::net::IpAddr;
 use tracing::{debug, info, warn};
@@ -25,8 +25,12 @@ impl DdnsClient {
             token: api_token.to_string(),
         };
 
-        let client = Client::new(credentials, ClientConfig::default(), Environment::Production)
-            .context("Failed to create Cloudflare client")?;
+        let client = Client::new(
+            credentials,
+            ClientConfig::default(),
+            Environment::Production,
+        )
+        .context("Failed to create Cloudflare client")?;
 
         Ok(Self { client })
     }
@@ -97,7 +101,10 @@ impl DdnsClient {
         if let Some(ref r) = record {
             debug!("Found existing record: {} -> {:?}", r.name, r.content);
         } else {
-            debug!("No existing {} record found for {}", record_type, record_name);
+            debug!(
+                "No existing {} record found for {}",
+                record_type, record_name
+            );
         }
 
         Ok(record)
@@ -173,7 +180,11 @@ impl DdnsClient {
 
     /// Update a DNS record configuration with the given IP
     /// Creates the record if it doesn't exist, updates it if the IP has changed
-    pub async fn update_ddns(&self, record_config: &RecordConfig, ip: IpAddr) -> Result<UpdateResult> {
+    pub async fn update_ddns(
+        &self,
+        record_config: &RecordConfig,
+        ip: IpAddr,
+    ) -> Result<UpdateResult> {
         // Get the zone ID
         let zone_id = self.get_zone_id(&record_config.zone).await?;
 
@@ -235,7 +246,10 @@ pub enum UpdateResult {
     /// Record was created (didn't exist before)
     Created,
     /// Record was updated with new IP
-    Updated { old_ip: Option<IpAddr>, new_ip: IpAddr },
+    Updated {
+        old_ip: Option<IpAddr>,
+        new_ip: IpAddr,
+    },
     /// Record already had the correct IP
     Unchanged,
 }

@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::IpAddr;
 use std::path::Path;
 
 /// Main configuration structure
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     /// Cloudflare API configuration
     pub cloudflare: CloudflareConfig,
@@ -17,14 +17,14 @@ pub struct Config {
 }
 
 /// Cloudflare authentication configuration
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CloudflareConfig {
     /// API token (recommended) - requires Zone:Read and DNS:Edit permissions
     pub api_token: String,
 }
 
 /// DNS record configuration
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RecordConfig {
     /// The zone name (e.g., "example.com")
     pub zone: String,
@@ -42,7 +42,7 @@ pub struct RecordConfig {
 }
 
 /// Optional settings
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct Settings {
     /// URL to fetch public IPv4 address
     #[serde(default = "default_ipv4_url")]
@@ -51,12 +51,14 @@ pub struct Settings {
     #[serde(default = "default_ipv6_url")]
     pub ipv6_url: String,
     /// Optional: Force a specific IP instead of auto-detecting
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub force_ip: Option<IpAddr>,
 }
 
 /// Supported DNS record types for DDNS
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RecordType {
+    #[default]
     A,
     AAAA,
 }
@@ -70,6 +72,18 @@ impl std::fmt::Display for RecordType {
     }
 }
 
+impl std::str::FromStr for RecordType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_uppercase().as_str() {
+            "A" => Ok(RecordType::A),
+            "AAAA" => Ok(RecordType::AAAA),
+            _ => anyhow::bail!("Invalid record type: {}. Use 'A' or 'AAAA'", s),
+        }
+    }
+}
+
 fn default_record_type() -> RecordType {
     RecordType::A
 }
@@ -78,11 +92,11 @@ fn default_ttl() -> u32 {
     1 // Automatic TTL
 }
 
-fn default_ipv4_url() -> String {
+pub fn default_ipv4_url() -> String {
     "https://api.ipify.org".to_string()
 }
 
-fn default_ipv6_url() -> String {
+pub fn default_ipv6_url() -> String {
     "https://api6.ipify.org".to_string()
 }
 
@@ -101,8 +115,38 @@ impl Config {
         Ok(config)
     }
 
+    /// Create a configuration from CLI arguments
+    pub fn from_args(
+        api_token: String,
+        zone: String,
+        record_name: String,
+        record_type: RecordType,
+        proxied: bool,
+        ttl: u32,
+        force_ip: Option<IpAddr>,
+    ) -> Result<Self> {
+        let config = Config {
+            cloudflare: CloudflareConfig { api_token },
+            records: vec![RecordConfig {
+                zone,
+                name: record_name,
+                record_type,
+                proxied,
+                ttl,
+            }],
+            settings: Settings {
+                ipv4_url: default_ipv4_url(),
+                ipv6_url: default_ipv6_url(),
+                force_ip,
+            },
+        };
+
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Validate the configuration
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.cloudflare.api_token.is_empty() {
             anyhow::bail!("Cloudflare API token cannot be empty");
         }
@@ -119,6 +163,17 @@ impl Config {
                 anyhow::bail!("Record name cannot be empty");
             }
         }
+
+        Ok(())
+    }
+
+    /// Save configuration to a TOML file
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let path = path.as_ref();
+        let content = toml::to_string_pretty(self).context("Failed to serialize config")?;
+
+        fs::write(path, content)
+            .with_context(|| format!("Failed to write config file: {}", path.display()))?;
 
         Ok(())
     }

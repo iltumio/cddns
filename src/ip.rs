@@ -5,7 +5,11 @@ use tracing::{debug, info};
 use crate::config::RecordType;
 
 /// Fetches the current public IP address
-pub async fn get_public_ip(record_type: RecordType, ipv4_url: &str, ipv6_url: &str) -> Result<IpAddr> {
+pub async fn get_public_ip(
+    record_type: RecordType,
+    ipv4_url: &str,
+    ipv6_url: &str,
+) -> Result<IpAddr> {
     match record_type {
         RecordType::A => {
             let ip = get_public_ipv4(ipv4_url).await?;
