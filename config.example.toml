@@ -41,3 +41,17 @@ ipv6_url = "https://api6.ipify.org"
 
 # Uncomment to force a specific IP instead of auto-detecting
 # force_ip = "1.2.3.4"
+
+# Service mode settings (for running as a daemon)
+[service]
+# Cron expression for scheduling updates
+# Format: "sec min hour day_of_month month day_of_week year"
+# Examples:
+#   "0 */5 * * * *"    - Every 5 minutes
+#   "0 0 * * * *"      - Every hour
+#   "0 0 */6 * * *"    - Every 6 hours
+#   "0 0 0 * * *"      - Daily at midnight
+cron = "0 */5 * * * *"
+
+# Whether to run an update immediately when the service starts
+run_on_start = true

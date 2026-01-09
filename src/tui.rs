@@ -15,11 +15,13 @@ use ratatui::{
 use std::io;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::process::Stdio;
 use tracing::Level;
 
 use crate::cloudflare::{DdnsClient, UpdateResult};
 use crate::config::{Config, RecordType};
 use crate::ip::get_public_ip;
+use crate::ipc::{self, Command, IpcConnection, Response, ServiceStatus};
 
 /// Default config file path
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
@@ -44,6 +46,8 @@ pub struct App {
     proxied: bool,
     /// TTL input
     ttl: String,
+    /// Cron expression
+    cron: String,
     /// Currently selected input field
     selected_field: usize,
     /// Status messages/logs
@@ -58,6 +62,10 @@ pub struct App {
     log_state: ListState,
     /// Whether config has unsaved changes
     dirty: bool,
+    /// Service status
+    service_status: Option<ServiceStatus>,
+    /// Whether we're connected to a running service
+    connected_to_service: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -123,16 +131,19 @@ impl Default for App {
             record_type: RecordType::A,
             proxied: false,
             ttl: "1".to_string(),
+            cron: "0 */5 * * * *".to_string(),
             selected_field: 0,
             logs: vec![LogEntry::new(
                 Level::INFO,
-                "Welcome to CDDNS! Press 'e' to edit fields, Enter to update DNS.",
+                "Welcome to CDDNS! Press '?' for help.",
             )],
             current_ip: None,
             updating: false,
             last_result: None,
             log_state: ListState::default(),
             dirty: false,
+            service_status: None,
+            connected_to_service: false,
         }
     }
 }
@@ -158,6 +169,7 @@ impl App {
             self.proxied = record.proxied;
             self.ttl = record.ttl.to_string();
         }
+        self.cron = config.service.cron.clone();
         self.dirty = false;
         self.log(
             Level::INFO,
@@ -168,7 +180,7 @@ impl App {
     /// Build config from current app state
     fn build_config(&self) -> Result<Config> {
         let ttl: u32 = self.ttl.parse().unwrap_or(1);
-        Config::from_args(
+        let mut config = Config::from_args(
             self.api_token.clone(),
             self.zone.clone(),
             self.record_name.clone(),
@@ -176,7 +188,9 @@ impl App {
             self.proxied,
             ttl,
             None,
-        )
+        )?;
+        config.service.cron = self.cron.clone();
+        Ok(config)
     }
 
     /// Save current config to file
@@ -212,7 +226,7 @@ impl App {
     }
 
     fn field_count() -> usize {
-        6 // api_token, zone, record_name, record_type, proxied, ttl
+        7 // api_token, zone, record_name, record_type, proxied, ttl, cron
     }
 
     fn next_field(&mut self) {
@@ -246,6 +260,7 @@ impl App {
             1 => Some(&mut self.zone),
             2 => Some(&mut self.record_name),
             5 => Some(&mut self.ttl),
+            6 => Some(&mut self.cron),
             _ => None,
         }
     }
@@ -269,6 +284,25 @@ impl App {
             if input.pop().is_some() {
                 self.mark_dirty();
             }
+        }
+    }
+
+    /// Check if service is running and update status
+    async fn refresh_service_status(&mut self) {
+        if IpcConnection::is_service_running() {
+            match ipc::send_command(Command::GetStatus).await {
+                Ok(Response::Status(status)) => {
+                    self.service_status = Some(status);
+                    self.connected_to_service = true;
+                }
+                _ => {
+                    self.service_status = None;
+                    self.connected_to_service = false;
+                }
+            }
+        } else {
+            self.service_status = None;
+            self.connected_to_service = false;
         }
     }
 }
@@ -308,6 +342,12 @@ pub async fn run(config_path: Option<PathBuf>) -> Result<()> {
         );
     }
 
+    // Check if service is running
+    app.refresh_service_status().await;
+    if app.connected_to_service {
+        app.log_success("Connected to running service");
+    }
+
     // Run app
     let result = run_app(&mut terminal, &mut app).await;
 
@@ -327,7 +367,15 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
+    let mut last_status_refresh = std::time::Instant::now();
+
     loop {
+        // Periodically refresh service status
+        if last_status_refresh.elapsed() > std::time::Duration::from_secs(2) {
+            app.refresh_service_status().await;
+            last_status_refresh = std::time::Instant::now();
+        }
+
         terminal.draw(|f| ui(f, app))?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -348,8 +396,20 @@ async fn run_app(
                     Screen::Main => match app.mode {
                         InputMode::Normal => match key.code {
                             KeyCode::Char('q') => return Ok(()),
+                            KeyCode::Char('d') => {
+                                // Detach - quit TUI but keep service running
+                                if app.connected_to_service {
+                                    app.log(Level::INFO, "Detaching from service...");
+                                    return Ok(());
+                                } else {
+                                    app.log(
+                                        Level::WARN,
+                                        "No service running. Use 'S' to start service first.",
+                                    );
+                                }
+                            }
                             KeyCode::Char('?') => app.screen = Screen::Help,
-                            KeyCode::Char('e') | KeyCode::Char('i') => {
+                            KeyCode::Char('e') => {
                                 app.mode = InputMode::Editing;
                             }
                             KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => {
@@ -366,13 +426,18 @@ async fn run_app(
                                     _ => {}
                                 }
                             }
-                            KeyCode::Enter => {
+                            KeyCode::Enter | KeyCode::Char('u') => {
                                 // Trigger update
                                 if !app.updating {
-                                    perform_update(app).await;
+                                    if app.connected_to_service {
+                                        // Send update command to service
+                                        trigger_service_update(app).await;
+                                    } else {
+                                        perform_update(app).await;
+                                    }
                                 }
                             }
-                            KeyCode::Char('d') => {
+                            KeyCode::Char('i') => {
                                 // Detect IP
                                 detect_ip(app).await;
                             }
@@ -380,6 +445,31 @@ async fn run_app(
                                 // Save config
                                 if let Err(e) = app.save_config() {
                                     app.log(Level::ERROR, &format!("Failed to save config: {}", e));
+                                }
+                            }
+                            KeyCode::Char('S') => {
+                                // Start service
+                                if !app.connected_to_service {
+                                    start_service(app).await;
+                                } else {
+                                    app.log(Level::WARN, "Service is already running");
+                                }
+                            }
+                            KeyCode::Char('X') => {
+                                // Stop service
+                                if app.connected_to_service {
+                                    stop_service(app).await;
+                                } else {
+                                    app.log(Level::WARN, "Service is not running");
+                                }
+                            }
+                            KeyCode::Char('r') => {
+                                // Refresh service status
+                                app.refresh_service_status().await;
+                                if app.connected_to_service {
+                                    app.log(Level::INFO, "Service status refreshed");
+                                } else {
+                                    app.log(Level::INFO, "Service is not running");
                                 }
                             }
                             _ => {}
@@ -517,13 +607,103 @@ async fn perform_update(app: &mut App) {
     app.updating = false;
 }
 
+async fn trigger_service_update(app: &mut App) {
+    app.log(Level::INFO, "Triggering service update...");
+
+    match ipc::send_command(Command::TriggerUpdate).await {
+        Ok(Response::UpdateResult { success, message }) => {
+            if success {
+                app.log_success(&message);
+            } else {
+                app.log(Level::ERROR, &message);
+            }
+            app.refresh_service_status().await;
+        }
+        Ok(_) => {
+            app.log(Level::ERROR, "Unexpected response from service");
+        }
+        Err(e) => {
+            app.log(
+                Level::ERROR,
+                &format!("Failed to communicate with service: {}", e),
+            );
+        }
+    }
+}
+
+async fn start_service(app: &mut App) {
+    // Save config first
+    if app.dirty {
+        if let Err(e) = app.save_config() {
+            app.log(Level::ERROR, &format!("Failed to save config: {}", e));
+            return;
+        }
+    }
+
+    app.log(Level::INFO, "Starting service...");
+
+    // Get the path to the current executable
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            app.log(
+                Level::ERROR,
+                &format!("Failed to get executable path: {}", e),
+            );
+            return;
+        }
+    };
+
+    // Spawn service in background
+    let result = std::process::Command::new(&exe)
+        .arg("service")
+        .arg("-c")
+        .arg(&app.config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+
+    match result {
+        Ok(_) => {
+            app.log_success("Service started in background");
+            // Wait a moment for service to start
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            app.refresh_service_status().await;
+        }
+        Err(e) => {
+            app.log(Level::ERROR, &format!("Failed to start service: {}", e));
+        }
+    }
+}
+
+async fn stop_service(app: &mut App) {
+    app.log(Level::INFO, "Stopping service...");
+
+    match ipc::send_command(Command::Stop).await {
+        Ok(Response::Stopping) => {
+            app.log_success("Service is stopping...");
+            // Wait a moment for service to stop
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            app.refresh_service_status().await;
+        }
+        Ok(_) => {
+            app.log(Level::ERROR, "Unexpected response from service");
+        }
+        Err(e) => {
+            app.log(Level::ERROR, &format!("Failed to stop service: {}", e));
+        }
+    }
+}
+
 fn ui(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
             Constraint::Length(3), // Title
-            Constraint::Min(12),   // Form
+            Constraint::Length(5), // Service status
+            Constraint::Min(14),   // Form
             Constraint::Length(3), // Status
             Constraint::Min(6),    // Logs
             Constraint::Length(3), // Help
@@ -545,8 +725,11 @@ fn ui(f: &mut Frame, app: &App) {
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(title, chunks[0]);
 
+    // Service status
+    render_service_status(f, app, chunks[1]);
+
     // Form
-    render_form(f, app, chunks[1]);
+    render_form(f, app, chunks[2]);
 
     // Status bar
     let status_text = if app.updating {
@@ -554,32 +737,100 @@ fn ui(f: &mut Frame, app: &App) {
     } else if let Some(ip) = app.current_ip {
         format!("Current IP: {}", ip)
     } else {
-        "Press 'd' to detect IP".to_string()
+        "Press 'i' to detect IP".to_string()
     };
     let status = Paragraph::new(status_text)
         .style(Style::default().fg(Color::Yellow))
         .block(Block::default().borders(Borders::ALL).title("Status"));
-    f.render_widget(status, chunks[2]);
+    f.render_widget(status, chunks[3]);
 
     // Logs
-    render_logs(f, app, chunks[3]);
+    render_logs(f, app, chunks[4]);
 
     // Help bar
     let help_text = match app.mode {
         InputMode::Normal => {
-            "q:Quit  e:Edit  Tab/j/k:Nav  Space:Toggle  Enter:Update  d:Detect IP  s:Save  ?:Help"
+            if app.connected_to_service {
+                "q:Quit d:Detach e:Edit i:IP u:Update s:Save S:Start X:Stop r:Refresh ?:Help"
+            } else {
+                "q:Quit e:Edit i:IP u:Update s:Save S:Start ?:Help"
+            }
         }
-        InputMode::Editing => "Esc:Stop editing  Tab:Next field  Enter:Done",
+        InputMode::Editing => "Esc:Done Tab:Next",
     };
     let help = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL));
-    f.render_widget(help, chunks[4]);
+    f.render_widget(help, chunks[5]);
 
     // Help popup
     if app.screen == Screen::Help {
         render_help_popup(f);
     }
+}
+
+fn render_service_status(f: &mut Frame, app: &App, area: Rect) {
+    let (status_text, status_color) = if let Some(ref status) = app.service_status {
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("Status: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    if status.running { "Running" } else { "Stopped" },
+                    Style::default().fg(if status.running {
+                        Color::Green
+                    } else {
+                        Color::Red
+                    }),
+                ),
+                Span::raw("  "),
+                Span::styled("Cron: ", Style::default().fg(Color::Gray)),
+                Span::styled(&status.cron, Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled("Last update: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    status.last_update.as_deref().unwrap_or("Never"),
+                    Style::default().fg(Color::White),
+                ),
+                Span::raw("  "),
+                Span::styled("Result: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    status.last_result.as_deref().unwrap_or("-"),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("IP: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    status.current_ip.as_deref().unwrap_or("Unknown"),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw("  "),
+                Span::styled("Records: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    status.record_count.to_string(),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+        ];
+        (Text::from(lines), Color::Green)
+    } else {
+        (
+            Text::from(Line::from(vec![
+                Span::styled("Status: ", Style::default().fg(Color::Gray)),
+                Span::styled("Not running", Style::default().fg(Color::Red)),
+                Span::raw("  (Press 'S' to start)"),
+            ])),
+            Color::Red,
+        )
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled("Service", Style::default().fg(status_color)));
+
+    let paragraph = Paragraph::new(status_text).block(block);
+    f.render_widget(paragraph, area);
 }
 
 fn render_form(f: &mut Frame, app: &App, area: Rect) {
@@ -592,6 +843,7 @@ fn render_form(f: &mut Frame, app: &App, area: Rect) {
     let fields = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(2),
             Constraint::Length(2),
             Constraint::Length(2),
             Constraint::Length(2),
@@ -639,7 +891,7 @@ fn render_form(f: &mut Frame, app: &App, area: Rect) {
     );
 
     // Record Type (toggle)
-    let type_display = format!("{} (Space to toggle)", app.record_type);
+    let type_display = format!("{} (Space)", app.record_type);
     render_field(
         f,
         "Record Type",
@@ -650,10 +902,7 @@ fn render_form(f: &mut Frame, app: &App, area: Rect) {
     );
 
     // Proxied (toggle)
-    let proxied_display = format!(
-        "{} (Space to toggle)",
-        if app.proxied { "Yes" } else { "No" }
-    );
+    let proxied_display = format!("{} (Space)", if app.proxied { "Yes" } else { "No" });
     render_field(
         f,
         "Proxied",
@@ -671,6 +920,16 @@ fn render_form(f: &mut Frame, app: &App, area: Rect) {
         app.selected_field == 5,
         editing,
         fields[5],
+    );
+
+    // Cron
+    render_field(
+        f,
+        "Cron",
+        &app.cron,
+        app.selected_field == 6,
+        editing,
+        fields[6],
     );
 }
 
@@ -727,51 +986,70 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_help_popup(f: &mut Frame) {
-    let area = centered_rect(60, 70, f.area());
+    let area = centered_rect(70, 80, f.area());
     f.render_widget(Clear, area);
 
     let help_text = vec![
         Line::from("Keyboard Shortcuts".bold().cyan()),
         Line::from(""),
+        Line::from("Navigation".bold().yellow()),
         Line::from(vec![
-            Span::styled("q", Style::default().fg(Color::Yellow)),
-            Span::raw("          - Quit application"),
+            Span::styled("  Tab / j / Down", Style::default().fg(Color::Cyan)),
+            Span::raw("  - Next field"),
         ]),
         Line::from(vec![
-            Span::styled("e / i", Style::default().fg(Color::Yellow)),
-            Span::raw("      - Enter edit mode"),
+            Span::styled("  Shift+Tab / k / Up", Style::default().fg(Color::Cyan)),
+            Span::raw("  - Previous field"),
         ]),
         Line::from(vec![
-            Span::styled("Esc", Style::default().fg(Color::Yellow)),
-            Span::raw("        - Exit edit mode"),
+            Span::styled("  Space", Style::default().fg(Color::Cyan)),
+            Span::raw("  - Toggle selected option"),
+        ]),
+        Line::from(""),
+        Line::from("Actions".bold().yellow()),
+        Line::from(vec![
+            Span::styled("  e", Style::default().fg(Color::Cyan)),
+            Span::raw("  - Enter edit mode"),
         ]),
         Line::from(vec![
-            Span::styled("Tab / j", Style::default().fg(Color::Yellow)),
-            Span::raw("    - Next field"),
+            Span::styled("  i", Style::default().fg(Color::Cyan)),
+            Span::raw("  - Detect current public IP"),
         ]),
         Line::from(vec![
-            Span::styled("Shift+Tab / k", Style::default().fg(Color::Yellow)),
-            Span::raw(" - Previous field"),
+            Span::styled("  u / Enter", Style::default().fg(Color::Cyan)),
+            Span::raw("  - Update DNS record"),
         ]),
         Line::from(vec![
-            Span::styled("Space", Style::default().fg(Color::Yellow)),
-            Span::raw("      - Toggle selected option"),
+            Span::styled("  s", Style::default().fg(Color::Cyan)),
+            Span::raw("  - Save configuration"),
+        ]),
+        Line::from(""),
+        Line::from("Service Control".bold().yellow()),
+        Line::from(vec![
+            Span::styled("  S", Style::default().fg(Color::Cyan)),
+            Span::raw("  - Start background service"),
         ]),
         Line::from(vec![
-            Span::styled("Enter", Style::default().fg(Color::Yellow)),
-            Span::raw("      - Update DNS record"),
+            Span::styled("  X", Style::default().fg(Color::Cyan)),
+            Span::raw("  - Stop background service"),
         ]),
         Line::from(vec![
-            Span::styled("d", Style::default().fg(Color::Yellow)),
-            Span::raw("          - Detect current public IP"),
+            Span::styled("  r", Style::default().fg(Color::Cyan)),
+            Span::raw("  - Refresh service status"),
         ]),
         Line::from(vec![
-            Span::styled("s", Style::default().fg(Color::Yellow)),
-            Span::raw("          - Save configuration to file"),
+            Span::styled("  d", Style::default().fg(Color::Cyan)),
+            Span::raw("  - Detach (quit TUI, keep service)"),
+        ]),
+        Line::from(""),
+        Line::from("Other".bold().yellow()),
+        Line::from(vec![
+            Span::styled("  q", Style::default().fg(Color::Cyan)),
+            Span::raw("  - Quit application"),
         ]),
         Line::from(vec![
-            Span::styled("?", Style::default().fg(Color::Yellow)),
-            Span::raw("          - Toggle this help"),
+            Span::styled("  ?", Style::default().fg(Color::Cyan)),
+            Span::raw("  - Toggle this help"),
         ]),
         Line::from(""),
         Line::from("Press any key to close".italic().dark_gray()),

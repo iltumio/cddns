@@ -14,6 +14,9 @@ pub struct Config {
     /// Optional settings
     #[serde(default)]
     pub settings: Settings,
+    /// Service mode settings
+    #[serde(default)]
+    pub service: ServiceConfig,
 }
 
 /// Cloudflare authentication configuration
@@ -53,6 +56,34 @@ pub struct Settings {
     /// Optional: Force a specific IP instead of auto-detecting
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force_ip: Option<IpAddr>,
+}
+
+/// Service mode configuration
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ServiceConfig {
+    /// Cron expression for scheduling updates (e.g., "*/5 * * * *" for every 5 minutes)
+    #[serde(default = "default_cron")]
+    pub cron: String,
+    /// Whether to run an update immediately on service start
+    #[serde(default = "default_run_on_start")]
+    pub run_on_start: bool,
+}
+
+impl Default for ServiceConfig {
+    fn default() -> Self {
+        Self {
+            cron: default_cron(),
+            run_on_start: default_run_on_start(),
+        }
+    }
+}
+
+fn default_cron() -> String {
+    "*/5 * * * *".to_string() // Every 5 minutes
+}
+
+fn default_run_on_start() -> bool {
+    true
 }
 
 /// Supported DNS record types for DDNS
@@ -139,6 +170,7 @@ impl Config {
                 ipv6_url: default_ipv6_url(),
                 force_ip,
             },
+            service: ServiceConfig::default(),
         };
 
         config.validate()?;

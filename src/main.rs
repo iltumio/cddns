@@ -1,6 +1,8 @@
 mod cloudflare;
 mod config;
 mod ip;
+mod ipc;
+mod service;
 mod tui;
 
 use anyhow::Result;
@@ -81,6 +83,13 @@ enum Commands {
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
+
+    /// Run as a background service with cron scheduling
+    Service {
+        /// Path to the configuration file
+        #[arg(short, long, default_value = "config.toml")]
+        config: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -132,6 +141,7 @@ async fn main() -> Result<()> {
             // Pass the config path to TUI - it will handle loading/saving
             tui::run(config).await
         }
+        Some(Commands::Service { config }) => service::run(config).await,
         None => {
             // Default behavior: try to load config.toml
             if PathBuf::from("config.toml").exists() {
@@ -141,6 +151,9 @@ async fn main() -> Result<()> {
                 eprintln!("  cddns config -f <config.toml>  - Use a config file");
                 eprintln!("  cddns update -t <token> -z <zone> -r <record>  - Use CLI arguments");
                 eprintln!("  cddns ui  - Open interactive TUI");
+                eprintln!(
+                    "  cddns service -c <config.toml>  - Run as a service with cron scheduling"
+                );
                 eprintln!("\nRun 'cddns --help' for more information.");
                 std::process::exit(1);
             }
