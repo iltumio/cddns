@@ -1,0 +1,15 @@
+services:
+  cddns:
+    build: .
+    image: cddns:latest
+    container_name: cddns
+    restart: unless-stopped
+    volumes:
+      - ./config:/config:ro
+    # No ports needed - outbound only
+    # Optional: use host network for better IP detection in some setups
+    # network_mode: host
+    environment:
+      # Optional: Override config values via environment
+      # CF_API_TOKEN: "your-token-here"
+      TZ: UTC
