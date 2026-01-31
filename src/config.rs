@@ -87,6 +87,7 @@ fn default_run_on_start() -> bool {
 }
 
 /// Supported DNS record types for DDNS
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RecordType {
     #[default]

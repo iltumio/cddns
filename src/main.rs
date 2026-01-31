@@ -172,6 +172,7 @@ async fn run_with_config(path: &PathBuf, dry_run: bool) -> Result<()> {
     run_update(&config, dry_run).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_with_args(
     api_token: String,
     zone: String,
