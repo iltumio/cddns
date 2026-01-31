@@ -6,7 +6,7 @@ description = "A simple Cloudflare DDNS updater"
 
 [dependencies]
 # Cloudflare API
-cloudflare = "0.14"
+cloudflare = { version = "0.14", default-features = false, features = ["rustls-tls"] }
 
 # Async runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "io-util", "sync"] }
@@ -16,7 +16,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
 # HTTP client for IP detection
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Error handling
 anyhow = "1"
