@@ -201,21 +201,17 @@ async fn handle_ipc(
                                 // Reload config
                                 {
                                     let mut state_guard = state.write().await;
-                                    if let Ok(new_config) =
-                                        Config::load(&state_guard.config_path)
-                                    {
+                                    if let Ok(new_config) = Config::load(&state_guard.config_path) {
                                         state_guard.config = new_config;
                                     }
                                 }
 
                                 // Run update
-                                let result =
-                                    run_update(state.clone(), Some(log_tx.clone())).await;
+                                let result = run_update(state.clone(), Some(log_tx.clone())).await;
                                 match result {
                                     Ok(_) => Response::UpdateResult {
                                         success: true,
-                                        message: "Update completed successfully"
-                                            .to_string(),
+                                        message: "Update completed successfully".to_string(),
                                     },
                                     Err(e) => Response::UpdateResult {
                                         success: false,
