@@ -68,12 +68,24 @@ jobs:
           name: cddns-${{ matrix.target }}
           path: dist/cddns-${{ matrix.target }}
 
-  docker:
-    name: Build Docker Image
+  docker-build:
+    name: Build Docker (${{ matrix.platform }})
     runs-on: ubuntu-latest
     environment: production
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
     steps:
       - uses: actions/checkout@v4
+
+      - name: Prepare platform slug
+        id: slug
+        run: echo "PLATFORM_SLUG=${PLATFORM//\//-}" >> $GITHUB_OUTPUT
+        env:
+          PLATFORM: ${{ matrix.platform }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -94,27 +106,102 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository }}
+            docker.io/iltumio/cddns
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: |
+            type=gha,scope=${{ steps.slug.outputs.PLATFORM_SLUG }}
+            type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-${{ steps.slug.outputs.PLATFORM_SLUG }}
+          cache-to: |
+            type=gha,scope=${{ steps.slug.outputs.PLATFORM_SLUG }},mode=max
+            type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-${{ steps.slug.outputs.PLATFORM_SLUG }},mode=max
+          outputs: |
+            type=image,"name=ghcr.io/${{ github.repository }},docker.io/iltumio/cddns",push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digests
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.slug.outputs.PLATFORM_SLUG }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-merge:
+    name: Merge Docker Manifests
+    runs-on: ubuntu-latest
+    environment: production
+    needs: docker-build
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Extract version
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
-            ghcr.io/${{ github.repository }}:latest
-            docker.io/iltumio/cddns:${{ steps.version.outputs.VERSION }}
-            docker.io/iltumio/cddns:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create manifest list on GHCR
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }} \
+            -t ghcr.io/${{ github.repository }}:latest \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+
+      - name: Create manifest list on Docker Hub
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t docker.io/iltumio/cddns:${{ steps.version.outputs.VERSION }} \
+            -t docker.io/iltumio/cddns:latest \
+            $(printf 'docker.io/iltumio/cddns@sha256:%s ' *)
+
+      - name: Inspect GHCR image
+        run: docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
+
+      - name: Inspect Docker Hub image
+        run: docker buildx imagetools inspect docker.io/iltumio/cddns:${{ steps.version.outputs.VERSION }}
 
   release:
     name: Create Release
-    needs: [build, docker]
+    needs: [build, docker-merge]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
