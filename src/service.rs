@@ -190,57 +190,52 @@ async fn handle_ipc(
                 let shutdown_tx = shutdown_tx.clone();
 
                 tokio::spawn(async move {
-                    loop {
-                        match conn.receive_command().await {
-                            Ok(cmd) => {
-                                let response = match cmd {
-                                    Command::Ping => Response::Pong,
-                                    Command::GetStatus => {
-                                        let state_guard = state.read().await;
-                                        Response::Status(state_guard.to_status())
+                    while let Ok(cmd) = conn.receive_command().await {
+                        let response = match cmd {
+                            Command::Ping => Response::Pong,
+                            Command::GetStatus => {
+                                let state_guard = state.read().await;
+                                Response::Status(state_guard.to_status())
+                            }
+                            Command::TriggerUpdate => {
+                                // Reload config
+                                {
+                                    let mut state_guard = state.write().await;
+                                    if let Ok(new_config) =
+                                        Config::load(&state_guard.config_path)
+                                    {
+                                        state_guard.config = new_config;
                                     }
-                                    Command::TriggerUpdate => {
-                                        // Reload config
-                                        {
-                                            let mut state_guard = state.write().await;
-                                            if let Ok(new_config) =
-                                                Config::load(&state_guard.config_path)
-                                            {
-                                                state_guard.config = new_config;
-                                            }
-                                        }
-
-                                        // Run update
-                                        let result =
-                                            run_update(state.clone(), Some(log_tx.clone())).await;
-                                        match result {
-                                            Ok(_) => Response::UpdateResult {
-                                                success: true,
-                                                message: "Update completed successfully"
-                                                    .to_string(),
-                                            },
-                                            Err(e) => Response::UpdateResult {
-                                                success: false,
-                                                message: e.to_string(),
-                                            },
-                                        }
-                                    }
-                                    Command::Stop => {
-                                        let _ = shutdown_tx.send(());
-                                        Response::Stopping
-                                    }
-                                };
-
-                                if conn.send_response(&response).await.is_err() {
-                                    break;
                                 }
 
-                                // If stopping, exit the loop
-                                if matches!(response, Response::Stopping) {
-                                    break;
+                                // Run update
+                                let result =
+                                    run_update(state.clone(), Some(log_tx.clone())).await;
+                                match result {
+                                    Ok(_) => Response::UpdateResult {
+                                        success: true,
+                                        message: "Update completed successfully"
+                                            .to_string(),
+                                    },
+                                    Err(e) => Response::UpdateResult {
+                                        success: false,
+                                        message: e.to_string(),
+                                    },
                                 }
                             }
-                            Err(_) => break,
+                            Command::Stop => {
+                                let _ = shutdown_tx.send(());
+                                Response::Stopping
+                            }
+                        };
+
+                        if conn.send_response(&response).await.is_err() {
+                            break;
+                        }
+
+                        // If stopping, exit the loop
+                        if matches!(response, Response::Stopping) {
+                            break;
                         }
                     }
                 });

@@ -90,12 +90,8 @@ impl DdnsClient {
 
         // Filter by record type
         let record = response.result.into_iter().find(|r| {
-            let matches_type = match (&r.content, record_type) {
-                (DnsContent::A { .. }, RecordType::A) => true,
-                (DnsContent::AAAA { .. }, RecordType::AAAA) => true,
-                _ => false,
-            };
-            matches_type && r.name == record_name
+            matches!((&r.content, record_type), (DnsContent::A { .. }, RecordType::A) | (DnsContent::AAAA { .. }, RecordType::AAAA))
+                && r.name == record_name
         });
 
         if let Some(ref r) = record {

@@ -7,7 +7,7 @@ use tokio::net::{UnixListener, UnixStream};
 /// Get the socket path for IPC
 pub fn socket_path() -> PathBuf {
     dirs::runtime_dir()
-        .or_else(|| dirs::state_dir())
+        .or_else(dirs::state_dir)
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("cddns.sock")
 }
