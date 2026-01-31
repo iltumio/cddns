@@ -1,4 +1,16 @@
-# cddns - Cloudflare Dynamic DNS Updater
+<p align="center">
+  <img src="logo.png" alt="cddns logo" width="200">
+</p>
+
+<h1 align="center">cddns - Cloudflare Dynamic DNS Updater</h1>
+
+<p align="center">
+  <a href="https://github.com/iltumio/cddns/actions/workflows/ci.yml"><img src="https://github.com/iltumio/cddns/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/iltumio/cddns/actions/workflows/release.yml"><img src="https://github.com/iltumio/cddns/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+  <a href="https://github.com/iltumio/cddns/releases/latest"><img src="https://img.shields.io/github/v/release/iltumio/cddns" alt="GitHub Release"></a>
+  <a href="https://hub.docker.com/r/iltumio/cddns"><img src="https://img.shields.io/docker/v/iltumio/cddns?label=docker" alt="Docker Image"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+</p>
 
 A fast, lightweight Cloudflare DDNS updater written in Rust with multiple operation modes including an interactive TUI, background service with cron scheduling, and Docker support.
 
