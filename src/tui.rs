@@ -426,15 +426,13 @@ async fn run_app(
                                     _ => {}
                                 }
                             }
-                            KeyCode::Enter | KeyCode::Char('u') => {
+                            KeyCode::Enter | KeyCode::Char('u') if !app.updating => {
                                 // Trigger update
-                                if !app.updating {
-                                    if app.connected_to_service {
-                                        // Send update command to service
-                                        trigger_service_update(app).await;
-                                    } else {
-                                        perform_update(app).await;
-                                    }
+                                if app.connected_to_service {
+                                    // Send update command to service
+                                    trigger_service_update(app).await;
+                                } else {
+                                    perform_update(app).await;
                                 }
                             }
                             KeyCode::Char('i') => {
