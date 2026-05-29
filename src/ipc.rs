@@ -138,10 +138,34 @@ impl IpcConnection {
         Ok(Self::new(stream))
     }
 
-    /// Check if service is running
+    /// Check if a service is actually running.
+    ///
+    /// We probe the socket by connecting rather than only checking that the
+    /// socket file exists. The socket file is only removed on a graceful
+    /// shutdown (`Drop for IpcServer`); an unclean termination (SIGKILL, OOM,
+    /// panic, `docker restart`, host reboot, or systemd's stop-timeout
+    /// escalating to SIGKILL) leaves a *stale* socket behind. Checking
+    /// existence alone would treat that stale file as a live service and refuse
+    /// to start, which under an auto-restarting supervisor becomes an endless
+    /// "Service is already running" loop. A connect attempt distinguishes the
+    /// two: a real listener accepts, a stale socket is refused — in which case
+    /// we remove it so the next bind succeeds.
     pub fn is_service_running() -> bool {
+        use std::os::unix::net::UnixStream;
+
         let path = socket_path();
-        path.exists()
+        if !path.exists() {
+            return false;
+        }
+
+        match UnixStream::connect(&path) {
+            Ok(_) => true,
+            Err(_) => {
+                // Stale socket from an unclean shutdown — clean it up.
+                std::fs::remove_file(&path).ok();
+                false
+            }
+        }
     }
 
     /// Send a command
@@ -184,4 +208,45 @@ pub async fn send_command(cmd: Command) -> Result<Response> {
     let mut conn = IpcConnection::connect().await?;
     conn.send_command(&cmd).await?;
     conn.receive_response().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    /// Point `socket_path()` at an isolated temp directory for the duration of
+    /// a test. `dirs::runtime_dir()` honours `$XDG_RUNTIME_DIR` on Linux.
+    fn isolate_socket_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cddns-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", &dir);
+        dir
+    }
+
+    #[test]
+    fn is_service_running_handles_missing_stale_and_live_sockets() {
+        let _dir = isolate_socket_dir();
+        let path = socket_path();
+        std::fs::remove_file(&path).ok();
+
+        // No socket file at all -> not running.
+        assert!(!IpcConnection::is_service_running());
+
+        // A stale socket file with no listener (e.g. left by a SIGKILL or
+        // reboot) -> not running, and the stale file is cleaned up.
+        std::fs::write(&path, b"").unwrap();
+        assert!(path.exists());
+        assert!(!IpcConnection::is_service_running());
+        assert!(
+            !path.exists(),
+            "stale socket should be removed so the next bind can succeed"
+        );
+
+        // A real listener bound to the socket -> running.
+        let _listener = UnixListener::bind(&path).unwrap();
+        assert!(IpcConnection::is_service_running());
+
+        std::fs::remove_file(&path).ok();
+    }
 }
